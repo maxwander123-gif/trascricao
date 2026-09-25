@@ -55,7 +55,7 @@ def command(url,folder):
           '--max-filesize',str(MAX_BYTES),'--match-filters','!is_live & duration <=? 1800',
           '--use-extractors','youtube,instagram,tiktok,tiktokvm',
           '--ffmpeg-location',imageio_ffmpeg.get_ffmpeg_exe(),
-          '-f','bv*+ba/b', '--merge-output-format','mp4',
+          '-f','bv+ba/b', '--merge-output-format','mp4',
           '--newline','--progress','--no-warnings','--no-write-info-json',
           '-o',str(folder/'video.%(ext)s')]
     node=shutil.which('node')
