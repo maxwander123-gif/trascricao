@@ -371,7 +371,7 @@ async def download_file(key: str):
     record=downloads.records.get(key)
     if not record or record['status']!='done': raise UserError('O arquivo não está disponível. Inicie o download novamente.', 'unavailable',404)
     record['updated']=time.monotonic()
-    return FileResponse(record['file'],filename='video'+record['file'].suffix,media_type='application/octet-stream')
+    return FileResponse(record['file'],filename='video'+record['file'].suffix,media_type='video/mp4')
 
 
 app.mount('/static' , StaticFiles(directory=ROOT / 'static'), name='static')

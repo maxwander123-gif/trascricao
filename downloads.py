@@ -54,7 +54,7 @@ def command(url,folder):
           '--max-filesize',str(MAX_BYTES),'--match-filters','!is_live & duration <=? 1800',
           '--use-extractors','youtube,instagram,tiktok,tiktokvm',
           '--ffmpeg-location',imageio_ffmpeg.get_ffmpeg_exe(),
-          '-f','b[ext=mp4]/bv[ext=mp4]+ba[ext=m4a]/b', '--merge-output-format','mp4',
+          '-f','bv*+ba/b', '--merge-output-format','mp4',
           '--newline','--progress','--no-warnings','--no-write-info-json',
           '-o',str(folder/'video.%(ext)s')]
     node=shutil.which('node')
@@ -69,6 +69,30 @@ def error_message(output):
     if any(x in text for x in ('max-filesize','larger than max','filesize is larger')): return 'Este vídeo ultrapassa 300 MB. Tente uma versão menor.'
     if any(x in text for x in ('does not pass filter','duration','live event')): return 'Escolha um vídeo gravado de até 30 minutos. Transmissões ao vivo não são aceitas.'
     return 'A plataforma não liberou o download deste vídeo. Ele pode estar privado, indisponível ou exigir acesso pelo aplicativo original. Tente outro link ou envie o arquivo que você já tem.'
+
+
+async def compatible_mp4(source, destination):
+    """Normalize actual codecs, not only the extension, for QuickTime/mobile."""
+    process = await asyncio.create_subprocess_exec(
+        imageio_ffmpeg.get_ffmpeg_exe(), '-nostdin', '-hide_banner', '-loglevel', 'error',
+        '-y', '-i', str(source), '-map', '0:v:0', '-map', '0:a:0?',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '21', '-pix_fmt', 'yuv420p',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-threads', '2',
+        '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart',
+        '-fs', str(MAX_BYTES + 1), str(destination),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    try:
+        async with asyncio.timeout(1200):
+            _, error = await process.communicate()
+        if process.returncode or not destination.exists() or not destination.stat().st_size:
+            raise UserError('Não foi possível preparar um MP4 compatível. Tente outro vídeo.', 'conversion')
+        if destination.stat().st_size > MAX_BYTES:
+            raise UserError('O vídeo convertido ultrapassa 300 MB. Escolha um vídeo menor.', 'too_large')
+        return destination
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
 
 async def run(key,url):
@@ -104,7 +128,9 @@ async def run(key,url):
         if process.returncode or len(files)!=1 or not files[0].stat().st_size:
             raise UserError(error_message(output),'unavailable')
         if files[0].stat().st_size>MAX_BYTES: raise UserError('Este vídeo ultrapassa 300 MB. Tente outro vídeo.', 'too_large')
-        record.update(status='done',detail='Vídeo pronto para salvar.',file=files[0],size=files[0].stat().st_size)
+        record['detail']='Convertendo para MP4 compatível…'
+        ready = await compatible_mp4(files[0], folder/'compatible.mp4')
+        record.update(status='done',detail='MP4 pronto para salvar.',file=ready,size=ready.stat().st_size)
     except asyncio.CancelledError:
         record.update(status='error',detail='Download interrompido. Tente novamente.')
         raise
