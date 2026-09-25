@@ -68,6 +68,26 @@ function updateStage(status, detail) {
   const index = order.indexOf(status);
   document.querySelectorAll('.steps li').forEach((item, i) => { item.classList.toggle('current', i === index); item.classList.toggle('complete', i < index); });
 }
+async function sendFileChunks(file, headers) {
+  const token = {'x-transcribe-token':headers['x-transcribe-token']};
+  const started = await fetch('/api/uploads', {method:'POST', headers:{...token,'Content-Type':'application/json'}, body:JSON.stringify({name:file.name,size:file.size})});
+  if (!started.ok) return started;
+  const {id} = await started.json();
+  try {
+    const step = 8 * 1024 * 1024;
+    for (let offset=0; offset<file.size; offset+=step) {
+      const sent = await fetch(`/api/uploads/${id}/chunk`, {method:'POST',headers:{...token,'Content-Type':'application/octet-stream','x-upload-offset':String(offset)}, body:file.slice(offset,offset+step)});
+      if (!sent.ok) throw new Error((await sent.json()).message || 'O envio foi interrompido. Tente novamente.');
+      updateStage('receiving', `Enviando arquivo… ${Math.round(Math.min(offset+step,file.size)/file.size*100)}%`);
+    }
+    const finished = await fetch(`/api/uploads/${id}/finish`,{method:'POST',headers:token});
+    if (!finished.ok) throw new Error((await finished.json()).message || 'Não foi possível iniciar a transcrição.');
+    return finished;
+  } catch(error) {
+    await fetch(`/api/uploads/${id}/cancel`,{method:'POST',headers:token}).catch(()=>{});
+    throw error;
+  }
+}
 async function start(input) {
   if (busy || creating) return;
   $('error').hidden = true;
@@ -79,7 +99,7 @@ async function start(input) {
     if (input.file) { headers['Content-Type'] = 'application/octet-stream'; headers['x-file-name'] = encodeURIComponent(input.file.name); body = input.file; }
     else { headers['Content-Type'] = 'application/json'; body = JSON.stringify({url:input.url}); }
     updateStage(input.file ? 'receiving' : 'preparing', input.file ? 'Enviando arquivo…' : 'Preparando vídeo…');
-    const response = await fetch('/api/jobs', {method:'POST', headers, body});
+    const response = input.file ? await sendFileChunks(input.file, headers) : await fetch('/api/jobs', {method:'POST', headers, body});
     const data = await response.json();
     if (!response.ok) throw new Error(data.message || 'Não foi possível iniciar a transcrição. Tente novamente.');
     storage.set('transcribe-job', data.id);
