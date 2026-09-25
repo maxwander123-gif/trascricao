@@ -20,6 +20,7 @@ import downloads
 import deployment
 
 creative_busy = set()
+uploads = {}
 
 from core import (ROOT, MAX_BYTES, EXTENSIONS, UserError, settings, validate_url,
                   resolve_media, download, extract_audio, transcribe)
@@ -32,6 +33,11 @@ log = logging.getLogger('transcribe')
 
 def prune():
     now = time.monotonic()
+    for key, upload in list(uploads.items()):
+        if not upload['busy'] and now - upload['updated'] > 3600:
+            shutil.rmtree(upload['folder'], ignore_errors=True)
+            uploads.pop(key, None)
+            jobs.pop(key, None)
     for key, value in list(jobs.items()):
         if value['status'] in ('done', 'error') and now - value['updated'] > 3600:
             jobs.pop(key, None)
@@ -52,6 +58,8 @@ async def lifespan(app):
         task.cancel()
     await asyncio.gather(cleaner, *tasks, return_exceptions=True)
     downloads.cleanup(all_records=True)
+    for upload in uploads.values(): shutil.rmtree(upload['folder'], ignore_errors=True)
+    uploads.clear()
 
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -116,6 +124,81 @@ async def bounded_body(request, limit, destination=None):
     if not size:
         raise UserError('Selecione um arquivo com conteúdo ou cole um link.', 'empty')
     return b''.join(chunks)
+
+
+@app.post('/api/uploads')
+async def begin_upload(request: Request):
+    prune()
+    if any(j['status'] not in ('done', 'error') for j in jobs.values()):
+        raise UserError('Já existe uma transcrição em andamento.', 'busy', 409)
+    try:
+        data = json.loads(await bounded_body(request, 8192))
+        filename, size = data['name'], data['size']
+        if not isinstance(filename, str) or type(size) is not int or size < 1 or size > MAX_BYTES:
+            raise ValueError()
+        if Path(filename).suffix.lower() not in EXTENSIONS: raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        raise UserError('Envie um vídeo ou áudio válido de até 300 MB.', 'invalid_upload')
+    # Recheck after reading the request, before reserving the processing slot.
+    if any(j['status'] not in ('done', 'error') for j in jobs.values()):
+        raise UserError('Já existe uma transcrição em andamento.', 'busy', 409)
+    key = secrets.token_urlsafe(24)
+    folder = Path(tempfile.mkdtemp(prefix='transcribe-'))
+    source = folder / ('input' + Path(filename).suffix.lower())
+    source.touch()
+    uploads[key] = dict(folder=folder, source=source, size=size, received=0,
+                        busy=False, updated=time.monotonic())
+    jobs[key] = dict(status='receiving', detail='Recebendo arquivo…',
+                     updated=time.monotonic(), title=Path(filename).name)
+    return JSONResponse({'id':key}, status_code=201)
+
+
+@app.post('/api/uploads/{key}/chunk')
+async def upload_chunk(key: str, request: Request):
+    upload = uploads.get(key)
+    if upload is None: raise UserError('O envio expirou. Envie novamente.', 'not_found', 404)
+    if upload['busy']: raise UserError('Aguarde o envio atual.', 'busy', 409)
+    try: offset = int(request.headers.get('x-upload-offset', '-1'))
+    except ValueError: offset = -1
+    if offset != upload['received']:
+        raise UserError('A ordem do envio não corresponde. Envie novamente.', 'offset', 409)
+    upload['busy'] = True
+    try:
+        remaining = upload['size'] - offset
+        if remaining <= 0: raise UserError('O arquivo já foi recebido.', 'complete', 409)
+        chunk = await asyncio.wait_for(bounded_body(request, min(8*1024*1024, remaining)), 180)
+        with upload['source'].open('ab') as file: file.write(chunk)
+        upload['received'] += len(chunk)
+        upload['updated'] = time.monotonic()
+        return {'received':upload['received']}
+    finally: upload['busy'] = False
+
+
+@app.post('/api/uploads/{key}/finish')
+async def finish_upload(key: str):
+    upload = uploads.get(key)
+    if upload is None: raise UserError('O envio expirou. Envie novamente.', 'not_found', 404)
+    if upload['busy'] or upload['received'] != upload['size']:
+        raise UserError('Aguarde o envio completo do arquivo.', 'incomplete', 409)
+    values = settings()
+    if not values.get('OPENAI_API_KEY'): raise UserError('OpenAI não configurada.', 'not_configured', 503)
+    uploads.pop(key)
+    jobs[key].update(status='preparing', detail='Preparando vídeo…')
+    task = asyncio.create_task(process(key, None, upload['source'], upload['folder'], values))
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+    return JSONResponse({'id':key}, status_code=202)
+
+
+@app.post('/api/uploads/{key}/cancel')
+async def cancel_upload(key: str):
+    upload = uploads.get(key)
+    if upload and upload['busy']: raise UserError('Aguarde o envio atual.', 'busy', 409)
+    if upload:
+        uploads.pop(key)
+        jobs.pop(key, None)
+        shutil.rmtree(upload['folder'], ignore_errors=True)
+    return {'ok':True}
 
 
 @app.post('/api/jobs')
