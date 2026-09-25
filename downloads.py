@@ -1,5 +1,6 @@
 """Public platform downloads; no account credentials or browser cookies."""
 import asyncio
+import logging
 from pathlib import Path
 import re
 import secrets
@@ -75,7 +76,7 @@ async def compatible_mp4(source, destination):
     """Normalize actual codecs, not only the extension, for QuickTime/mobile."""
     process = await asyncio.create_subprocess_exec(
         imageio_ffmpeg.get_ffmpeg_exe(), '-nostdin', '-hide_banner', '-loglevel', 'error',
-        '-y', '-i', str(source), '-map', '0:v:0', '-map', '0:a:0?',
+        '-y', '-threads', '2', '-filter_threads', '1', '-i', str(source), '-map', '0:v:0', '-map', '0:a:0?',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '21', '-pix_fmt', 'yuv420p',
         '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-threads', '2',
         '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart',
@@ -85,6 +86,7 @@ async def compatible_mp4(source, destination):
         async with asyncio.timeout(1200):
             _, error = await process.communicate()
         if process.returncode or not destination.exists() or not destination.stat().st_size:
+            logging.getLogger(__name__).error('MP4 conversion failed (%s): %s', process.returncode, error.decode(errors='replace')[-4000:])
             raise UserError('Não foi possível preparar um MP4 compatível. Tente outro vídeo.', 'conversion')
         if destination.stat().st_size > MAX_BYTES:
             raise UserError('O vídeo convertido ultrapassa 300 MB. Escolha um vídeo menor.', 'too_large')
